@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кофе-робот · админка</title>
+<style>
+  :root { --bg:#111; --card:#1d1d1d; --fg:#eee; --muted:#999; --ok:#2e7d32; --bad:#c62828; --acc:#ff9800; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); padding:16px; max-width:720px; margin:auto; }
+  h1 { font-size:20px; } h2 { font-size:16px; margin:0 0 12px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .col h3 { text-align:center; margin:0 0 8px; font-size:15px; }
+  .slot { display:flex; justify-content:space-between; align-items:center; width:100%; padding:10px 12px; margin:4px 0;
+          border:none; border-radius:8px; font-size:15px; color:#fff; cursor:pointer; }
+  .slot.on { background:var(--ok); } .slot.off { background:#3a3a3a; color:var(--muted); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  button.act { flex:1; padding:12px; border:none; border-radius:8px; font-size:15px; cursor:pointer; color:#fff; background:#444; }
+  button.fill { background:var(--ok); } button.clear { background:#555; } button.danger { background:var(--bad); }
+  .stat { display:flex; justify-content:space-between; padding:4px 0; color:var(--muted); } .stat b { color:var(--fg); }
+  .thumbs { display:flex; flex-wrap:wrap; gap:6px; } .thumbs img { width:56px; height:56px; border-radius:6px; }
+  .ev { font-size:13px; color:var(--muted); padding:3px 0; border-bottom:1px solid #2a2a2a; }
+  input { padding:12px; font-size:16px; border-radius:8px; border:1px solid #444; background:#222; color:var(--fg); width:100%; }
+  #login { max-width:320px; margin:20vh auto; } .err { color:#ef5350; margin-top:8px; }
+</style>
+</head>
+<body>
+<div id="login" class="card">
+  <h2>Админка кофе-робота</h2>
+  <input id="pin" type="password" inputmode="numeric" placeholder="PIN">
+  <div class="row" style="margin-top:12px"><button class="act fill" onclick="login()">Войти</button></div>
+  <div id="loginErr" class="err"></div>
+</div>
+
+<div id="app" style="display:none">
+  <h1>☕ Кофе-робот</h1>
+
+  <div class="card">
+    <h2>Ячейки с кофе — <span id="filled"></span></h2>
+    <div class="cols">
+      <div class="col"><h3>Левая</h3><div id="left"></div></div>
+      <div class="col"><h3>Правая</h3><div id="right"></div></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="act fill" onclick="post('/api/slots/fill')">Заполнить всё</button>
+      <button class="act clear" onclick="confirm('Отметить все ячейки пустыми?') && post('/api/slots/clear')">Очистить всё</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>База лиц</h2>
+    <div class="stat">В базе <b id="faces"></b></div>
+    <div class="stat">Выдано сегодня <b id="approved"></b></div>
+    <div class="stat">Отказов сегодня <b id="denied"></b></div>
+    <div class="stat">Последний сброс <b id="lastReset"></b></div>
+    <div class="stat">Автосброс <b id="autoReset"></b></div>
+    <div class="stat">Выдача <b id="controller"></b></div>
+    <div class="row" style="margin:12px 0">
+      <button class="act danger" onclick="confirm('Удалить все лица? Все снова смогут получить кофе.') && post('/api/faces/reset')">Сбросить базу лиц</button>
+    </div>
+    <div class="thumbs" id="thumbs"></div>
+  </div>
+
+  <div class="card">
+    <h2>Журнал</h2>
+    <div id="events"></div>
+  </div>
+</div>
+
+<script>
+let PIN = '';
+try { PIN = sessionStorage.getItem('pin') || ''; } catch (e) {}
+const thumbCache = {};
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { 'X-Pin': PIN, 'Content-Type': 'application/json' } });
+  if (r.status === 401) throw new Error('Неверный PIN');
+  return r;
+}
+async function login() {
+  PIN = document.getElementById('pin').value;
+  try { await refresh(); try { sessionStorage.setItem('pin', PIN); } catch (e) {} }
+  catch (e) { document.getElementById('loginErr').textContent = e.message; }
+}
+async function post(path, body) {
+  await api(path, { method: 'POST', body: JSON.stringify(body || {}) });
+  refresh();
+}
+function slotButtons(side, arr) {
+  const el = document.getElementById(side);
+  el.innerHTML = '';
+  arr.forEach((on, i) => {
+    const b = document.createElement('button');
+    b.className = 'slot ' + (on ? 'on' : 'off');
+    b.innerHTML = `<span>№${i + 1}</span><span>${on ? '☕ есть' : 'пусто'}</span>`;
+    b.onclick = () => post('/api/slot', { side, idx: i + 1, filled: !on });
+    el.appendChild(b);
+  });
+}
+const fmt = ts => new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+async function loadThumb(img, id) {
+  if (thumbCache[id]) { img.src = thumbCache[id]; return; }
+  const r = await api('/api/thumb/' + id);
+  if (r.ok) { thumbCache[id] = URL.createObjectURL(await r.blob()); img.src = thumbCache[id]; }
+}
+async function refresh() {
+  const s = await (await api('/api/state')).json();
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('app').style.display = '';
+  slotButtons('left', s.slots.left);
+  slotButtons('right', s.slots.right);
+  document.getElementById('filled').textContent = `${s.filled} из ${s.total}`;
+  document.getElementById('faces').textContent = s.faces;
+  document.getElementById('approved').textContent = s.approvedToday;
+  document.getElementById('denied').textContent = s.deniedToday;
+  document.getElementById('lastReset').textContent = s.lastReset ? new Date(s.lastReset).toLocaleString('ru-RU') : '—';
+  document.getElementById('autoReset').textContent = s.autoReset;
+  document.getElementById('controller').textContent = s.controller;
+  const th = document.getElementById('thumbs'); th.innerHTML = '';
+  s.recentFaces.filter(f => f.hasThumb).forEach(f => {
+    const img = document.createElement('img'); img.title = fmt(f.ts); th.appendChild(img); loadThumb(img, f.id);
+  });
+  document.getElementById('events').innerHTML = s.events.map(e =>
+    `<div class="ev">${fmt(e.ts)} · <b>${e.type}</b> ${e.detail.replace(/</g, '&lt;')}</div>`).join('');
+}
+document.getElementById('pin').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+if (PIN) refresh().catch(() => {});
+setInterval(() => { if (document.getElementById('app').style.display === '') refresh().catch(() => {}); }, 3000);
+</script>
+</body>
+</html>
